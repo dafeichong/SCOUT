@@ -1,0 +1,28 @@
+name: scout-table
+services:
+  scout:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${HTTP_PORT:-8080}:3000"
+    environment:
+      NODE_ENV: production
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-}
+      MAX_ROOMS: ${MAX_ROOMS:-200}
+    volumes:
+      - scout-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  scout-data:
