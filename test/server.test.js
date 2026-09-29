@@ -132,15 +132,20 @@ test('persistent room survives process restart and resumes same private hand', a
   a.socket.disconnect(); b.socket.disconnect();
   await server.close();
   server = await boot({ dataDir: dir });
+  const guestFirst = await client(server, b.cookie);
+  t.after(() => guestFirst.socket.disconnect());
+  await waitFor(() => guestFirst.room?.code === code);
+  assert.equal(guestFirst.room.hostId, a.room.you);
   const resumed = await client(server, a.cookie);
   t.after(() => resumed.socket.disconnect());
   await waitFor(() => resumed.room?.code === code);
   assert.deepEqual(resumed.room.players.find(p => p.id === resumed.room.you).hand, hand);
   assert.equal(resumed.room.phase, 'orient');
+  assert.equal(resumed.room.hostId, resumed.room.you);
 });
 
-test('host transfers on disconnect, lobby removal and full-room rejection', async t => {
-  const server = await boot();
+test('host transfers after grace period, lobby removal and full-room rejection', async t => {
+  const server = await boot({ hostGraceMs: 100 });
   t.after(() => server.close());
   const clients = await Promise.all(Array.from({ length: 6 }, () => client(server)));
   t.after(() => clients.forEach(p => p.socket.disconnect()));
@@ -153,6 +158,104 @@ test('host transfers on disconnect, lobby removal and full-room rejection', asyn
   await waitFor(() => clients[1].room.hostId === clients[1].room.you);
   assert.ok((await clients[1].command('remove', { playerId: oldHost })).ok);
   assert.ok((await clients[5].command('join', { name: 'P5', code })).ok);
+});
+
+test('host refresh during a game preserves ownership, hand and ability to end the game', async t => {
+  const server = await boot({ hostGraceMs: 500 });
+  t.after(() => server.close());
+  const a = await client(server), b = await client(server);
+  t.after(() => { a.socket.disconnect(); b.socket.disconnect(); });
+  assert.ok((await a.command('create', { name: 'Host' })).ok);
+  assert.ok((await b.command('join', { name: 'Guest', code: a.room.code })).ok);
+  await waitFor(() => a.room.players.length === 2);
+  assert.ok((await a.command('start')).ok);
+  const hand = a.room.players.find(p => p.id === a.room.you).hand;
+  a.socket.disconnect();
+  await waitFor(() => b.room.players.some(p => p.id === a.room.you && !p.online));
+  assert.equal(b.room.hostId, a.room.you);
+  const resumed = await client(server, a.cookie);
+  t.after(() => resumed.socket.disconnect());
+  await waitFor(() => resumed.room?.you === a.room.you);
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.equal(resumed.room.hostId, resumed.room.you);
+  assert.deepEqual(resumed.room.players.find(p => p.id === resumed.room.you).hand, hand);
+  assert.ok((await resumed.command('reset')).ok);
+  await waitFor(() => b.room.phase === 'lobby');
+});
+
+test('host can end during orientation or another player turn, including an offline player', async t => {
+  const server = await boot();
+  t.after(() => server.close());
+  const a = await client(server), b = await client(server);
+  t.after(() => { a.socket.disconnect(); b.socket.disconnect(); });
+  assert.ok((await a.command('create', { name: 'Host' })).ok);
+  const code = a.room.code;
+  assert.ok((await b.command('join', { name: 'Guest', code })).ok);
+  await waitFor(() => a.room.players.length === 2);
+  const ids = a.room.players.map(p => p.id);
+  assert.ok((await a.command('start')).ok);
+  await waitFor(() => b.room.phase === 'orient');
+  assert.equal((await b.command('reset')).ok, false);
+  assert.ok((await a.command('reset')).ok);
+  await waitFor(() => b.room.phase === 'lobby');
+  assert.ok((await a.command('start')).ok);
+  assert.ok((await a.command('ready')).ok);
+  await waitFor(() => b.room.version === a.room.version);
+  assert.ok((await b.command('ready')).ok);
+  await waitFor(() => a.room.phase === 'playing');
+  assert.ok((await a.command('show', { start: 0, count: 1 })).ok);
+  assert.equal(a.room.turnId, b.room.you);
+  await waitFor(() => b.room.version === a.room.version);
+  assert.equal((await b.command('reset')).ok, false);
+  b.socket.disconnect();
+  await waitFor(() => a.room.players.some(p => p.id === b.room.you && !p.online));
+  assert.ok((await a.command('reset')).ok);
+  assert.equal(a.room.phase, 'lobby');
+  assert.equal(a.room.code, code);
+  assert.deepEqual(a.room.players.map(p => p.id), ids);
+  assert.ok(a.room.players.every(p => p.score === 0 && p.handCount === 0));
+  assert.deepEqual(a.room.history, []);
+  const rejoined = await client(server, b.cookie);
+  t.after(() => rejoined.socket.disconnect());
+  await waitFor(() => rejoined.room?.phase === 'lobby');
+  await waitFor(() => a.room.players.every(p => p.online));
+  assert.equal(rejoined.room.you, b.room.you);
+  assert.ok((await a.command('start')).ok);
+});
+
+test('another host tab keeps ownership; joining and guest reconnect cannot bypass the grace period', async t => {
+  const server = await boot({ hostGraceMs: 500 });
+  t.after(() => server.close());
+  const clients = await Promise.all([client(server), client(server), client(server)]);
+  t.after(() => clients.forEach(p => p.socket.disconnect()));
+  const [a, b, c] = clients;
+  assert.ok((await a.command('create', { name: 'Host' })).ok);
+  const code = a.room.code;
+  assert.ok((await b.command('join', { name: 'Guest', code })).ok);
+  const otherTab = await client(server, a.cookie);
+  clients.push(otherTab);
+  await waitFor(() => otherTab.room?.you === a.room.you);
+  a.socket.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 600));
+  assert.equal(b.room.hostId, a.room.you);
+  assert.equal(b.room.players.find(p => p.id === a.room.you).online, true);
+  otherTab.socket.disconnect();
+  await waitFor(() => b.room.players.some(p => p.id === a.room.you && !p.online));
+  assert.ok((await c.command('join', { name: 'New guest', code })).ok);
+  assert.equal(c.room.hostId, a.room.you);
+  const guestTab = await client(server, b.cookie);
+  clients.push(guestTab);
+  await waitFor(() => guestTab.room !== null);
+  assert.equal(guestTab.room.hostId, a.room.you);
+  await waitFor(() => b.room.hostId === b.room.you);
+  const lateHost = await client(server, a.cookie);
+  clients.push(lateHost);
+  await waitFor(() => lateHost.room !== null);
+  assert.equal(lateHost.room.hostId, b.room.you);
+  assert.ok((await lateHost.command('leave')).ok);
+  await waitFor(() => b.room.players.length === 2);
+  assert.ok((await b.command('leave')).ok);
+  await waitFor(() => c.room.hostId === c.room.you);
 });
 
 test('cross-origin and missing-session connections are rejected', async t => {

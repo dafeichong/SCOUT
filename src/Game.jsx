@@ -50,6 +50,7 @@ export default function Game({ room, command, busy, connected, notify }) {
   const [range, setRange] = useState(null);
   const [scoutMode, setScoutMode] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [resetError, setResetError] = useState('');
   const [inviteOpen, setInviteOpen] = useState(false);
   const me = room.players.find(p => p.id === room.you);
   const host = room.hostId === room.you;
@@ -64,6 +65,9 @@ export default function Game({ room, command, busy, connected, notify }) {
   const scoutAllowed = myTurn && activeCards.length > 0 && (!duel || me.chips > 0);
   const allOnline = room.players.every(p => p.online);
   useEffect(() => { setRange(null); setScoutMode(null); }, [room.version]);
+  useEffect(() => {
+    if (!host || room.phase === 'lobby') setConfirmReset(false);
+  }, [host, room.phase]);
   async function copyInvite() {
     const link = `${location.origin}/?room=${room.code}`;
     if (await copyText(link)) notify('邀请链接已复制，发给朋友即可加入。');
@@ -76,7 +80,7 @@ export default function Game({ room, command, busy, connected, notify }) {
     setRange([best.start, best.start + best.count - 1]);
   }
   return <main className="room-main">
-    <div className="room-heading"><div><span className="eyebrow">{room.phase === 'lobby' ? 'PRIVATE TABLE' : `ROUND ${pad(room.round)} / ${pad(room.rounds)}`}</span><h1>好友私桌 <span className="room-code">{room.code}</span></h1></div><div className="room-tools"><button className="button secondary" onClick={copyInvite}>复制邀请链接</button>{host && room.phase !== 'lobby' && <button className="text-button" onClick={() => setConfirmReset(true)}>返回大厅</button>}</div></div>
+    <div className="room-heading"><div><span className="eyebrow">{room.phase === 'lobby' ? 'PRIVATE TABLE' : `ROUND ${pad(room.round)} / ${pad(room.rounds)}`}</span><h1>好友私桌 <span className="room-code">{room.code}</span></h1></div><div className="room-tools"><button className="button secondary" onClick={copyInvite}>复制邀请链接</button>{host && room.phase !== 'lobby' && <button className="button danger" disabled={disabled} onClick={() => { setResetError(''); setConfirmReset(true); }}>{room.phase === 'finished' ? '返回大厅' : '结束本局'}</button>}</div></div>
     {!connected && <div className="notice" role="status">连接中断，正在自动重连。你的座位与手牌会保留。</div>}
     {room.phase === 'lobby' ? <section className="lobby"><span className="eyebrow">TAKE YOUR SEAT</span><h2>等朋友，来一场好戏。</h2><p className="muted">分享房间码或邀请链接，2～5 人就能开局。</p><div className="seats">{Array.from({ length: 5 }, (_, i) => { const p = room.players[i]; return <div className={`seat ${p ? 'occupied' : ''}`} key={i}><div className={`avatar ${p ? `avatar-${i}` : ''}`}>{p ? p.name.slice(0, 1) : '＋'}</div><strong>{p?.name || '等待入座'}{p?.id === room.you && <small>（你）</small>}</strong><span>{p ? `${p.id === room.hostId ? '房主 · ' : ''}${p.online ? '已入座' : '离线'}` : `SEAT ${pad(i + 1)}`}</span>{p && !p.online && host && <button className="text-button remove-seat" disabled={disabled} onClick={() => command('remove', { playerId: p.id })}>移除离线座位</button>}</div>; })}</div><div className="lobby-actions"><button className="button primary" disabled={disabled || room.players.length < 2 || !host || !allOnline} onClick={() => command('start')}>{host ? `开始游戏 · ${room.players.length}/5 人` : '等待房主开始'}</button><button className="text-button" disabled={disabled} onClick={() => command('leave')}>离开房间</button></div><p className="muted">{room.players.length < 2 ? '还差一位朋友。你也可以用另一台设备或无痕窗口加入。' : !allOnline ? '有玩家离线，等待重连或由房主移除后再开始。' : duel ? '双人规则：每轮 3 次招募，招募后继续自己的回合。' : `标准规则：每人 ${room.players.length === 3 ? 12 : room.players.length === 4 ? 11 : 9} 张，共 ${room.players.length} 轮。`}</p></section> : <div className="game-grid">
       <div className="game-primary">
@@ -95,6 +99,6 @@ export default function Game({ room, command, busy, connected, notify }) {
     </div>}
     {inviteOpen && <InviteDialog link={`${location.origin}/?room=${room.code}`} code={room.code} onClose={() => setInviteOpen(false)}/>}
     {scoutMode && room.active && <ScoutDialog key={`${scoutMode}-${room.version}`} room={room} mode={scoutMode} command={command} busy={disabled} onClose={() => setScoutMode(null)}/>}
-    {confirmReset && <Modal title="返回大厅" onClose={() => setConfirmReset(false)}><span className="eyebrow">BACK TO LOBBY</span><h2>结束本场，返回大厅？</h2><p>所有人将回到原房间大厅。本场手牌与分数会清空，可以重新开局。</p><div className="dialog-actions"><button className="button secondary" onClick={() => setConfirmReset(false)}>继续游戏</button><button className="button primary" disabled={disabled} onClick={async () => { if (await command('reset')) setConfirmReset(false); }}>结束并返回大厅</button></div></Modal>}
+    {confirmReset && host && room.phase !== 'lobby' && <Modal title="结束本局" onClose={() => setConfirmReset(false)}><span className="eyebrow">BACK TO LOBBY</span><h2>结束本局，返回大厅？</h2><p>这会结束整场游戏（包括后续轮次），清空本场手牌与分数。房间码和玩家座位会保留，所有人一起返回大厅，可以重新开局。</p>{resetError && <p className="negative" role="alert">{resetError}</p>}<div className="dialog-actions"><button className="button secondary" onClick={() => setConfirmReset(false)}>继续游戏</button><button className="button danger" disabled={disabled} onClick={async () => { setResetError(''); if (await command('reset')) setConfirmReset(false); else setResetError('结束失败，请确认连接正常后重试。'); }}>{busy ? '正在结束…' : '结束并返回大厅'}</button></div></Modal>}
   </main>;
 }

@@ -22,13 +22,15 @@ function nameFrom(value) {
   return name;
 }
 
-export function createGameServer({ dataDir = './data', publicOrigin = '', maxRooms = 200, distDir = resolve('dist'), rateLimit = true } = {}) {
+export function createGameServer({ dataDir = './data', publicOrigin = '', maxRooms = 200, distDir = resolve('dist'), rateLimit = true, hostGraceMs = 30_000 } = {}) {
   if (publicOrigin && new URL(publicOrigin).origin !== publicOrigin) throw new Error('PUBLIC_ORIGIN must be an exact origin, without a trailing slash.');
   const store = new RoomStore(dataDir);
   const app = express();
   app.disable('x-powered-by');
   const http = createServer(app);
   const buckets = new Map();
+  const hostTimers = new Map();
+  let closing = false;
   function limit(key, max, windowMs) {
     if (!rateLimit) return true;
     const now = Date.now();
@@ -96,20 +98,40 @@ export function createGameServer({ dataDir = './data', publicOrigin = '', maxRoo
     room.version++;
     room.updatedAt = Date.now();
     store.set(room);
+    maintainHost(room);
     broadcast(room);
   }
-  function reassignHost(room) {
-    if (online(room, room.hostId)) return room;
-    const next = room.players.find(p => online(room, p.id));
-    if (!next || next.id === room.hostId) return room;
-    const updated = structuredClone(room);
-    updated.hostId = next.id;
-    commit(updated);
-    return updated;
+  function cancelHostTimer(code) {
+    clearTimeout(hostTimers.get(code)?.timer);
+    hostTimers.delete(code);
+  }
+  function maintainHost(room) {
+    if (closing) return;
+    const pending = hostTimers.get(room.code);
+    if (online(room, room.hostId) || !room.players.some(p => online(room, p.id))) {
+      cancelHostTimer(room.code);
+      return;
+    }
+    if (pending?.hostId === room.hostId) return;
+    cancelHostTimer(room.code);
+    // Keep ownership during refreshes; joining or reconnecting must not skip the grace period.
+    const timer = setTimeout(() => {
+      hostTimers.delete(room.code);
+      if (closing) return;
+      const current = store.rooms.get(room.code);
+      if (!current || current.hostId !== room.hostId || online(current, current.hostId)) return;
+      const next = current.players.find(p => online(current, p.id));
+      if (!next) return;
+      const updated = structuredClone(current);
+      updated.hostId = next.id;
+      try { commit(updated); } catch (error) { console.error('Host transfer failed:', error); }
+    }, hostGraceMs);
+    timer.unref();
+    hostTimers.set(room.code, { hostId: room.hostId, timer });
   }
   io.on('connection', socket => {
     const existing = membership(socket.data.sessionHash);
-    if (existing) broadcast(reassignHost(existing.room));
+    if (existing) { maintainHost(existing.room); broadcast(existing.room); }
     else socket.emit('room:state', null);
     socket.on('room:command', (message, ack) => {
       if (typeof ack !== 'function') return;
@@ -138,7 +160,6 @@ export function createGameServer({ dataDir = './data', publicOrigin = '', maxRoo
             assert(!room.players.some(p => p.name === name), '这个昵称已被使用，请换一个。');
             const updated = structuredClone(room);
             updated.players.push(player);
-            if (!online(room, room.hostId)) updated.hostId = player.id;
             commit(updated);
           }
         } else {
@@ -149,7 +170,7 @@ export function createGameServer({ dataDir = './data', publicOrigin = '', maxRoo
             assert(room.phase === 'lobby', '请房主先返回大厅，再离开房间。');
             const updated = structuredClone(room);
             updated.players = updated.players.filter(p => p.id !== player.id);
-            if (!updated.players.length) store.delete(room.code);
+            if (!updated.players.length) { store.delete(room.code); cancelHostTimer(room.code); }
             else {
               if (updated.hostId === player.id) updated.hostId = (updated.players.find(p => online(updated, p.id)) ?? updated.players[0]).id;
               commit(updated);
@@ -178,21 +199,26 @@ export function createGameServer({ dataDir = './data', publicOrigin = '', maxRoo
     socket.on('disconnect', () => {
       const current = membership(socket.data.sessionHash);
       if (current) {
-        try { broadcast(reassignHost(current.room)); } catch (error) { console.error('Presence update failed:', error); }
+        try { maintainHost(current.room); broadcast(current.room); } catch (error) { console.error('Presence update failed:', error); }
       }
     });
   });
   const sweep = setInterval(() => {
     try {
       for (const room of store.rooms.values()) {
-        if (Date.now() - room.updatedAt > MAX_AGE && !room.players.some(p => online(room, p.id))) store.delete(room.code);
+        if (Date.now() - room.updatedAt > MAX_AGE && !room.players.some(p => online(room, p.id))) {
+          store.delete(room.code);
+          cancelHostTimer(room.code);
+        }
       }
       for (const [key, value] of buckets) if (Date.now() - value.time > 60_000) buckets.delete(key);
     } catch (error) { console.error('Room cleanup failed:', error); }
   }, 60_000);
   sweep.unref();
   return { app, http, io, store, close: () => new Promise(resolveClose => {
+    closing = true;
     clearInterval(sweep);
+    for (const code of hostTimers.keys()) cancelHostTimer(code);
     io.close(() => resolveClose());
   }) };
 }
