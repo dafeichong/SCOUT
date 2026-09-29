@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { beats, describeSet, legalShows } from '../shared/rules.js';
 import { Card, Modal, chooseRange } from './ui.jsx';
+import { copyText } from './clipboard.js';
+import InviteDialog from './InviteDialog.jsx';
 
 const pad = n => String(n).padStart(2, '0');
 const signed = n => n > 0 ? `+${n}` : String(n);
@@ -48,6 +50,7 @@ export default function Game({ room, command, busy, connected, notify }) {
   const [range, setRange] = useState(null);
   const [scoutMode, setScoutMode] = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const me = room.players.find(p => p.id === room.you);
   const host = room.hostId === room.you;
   const duel = room.players.length === 2;
@@ -63,8 +66,8 @@ export default function Game({ room, command, busy, connected, notify }) {
   useEffect(() => { setRange(null); setScoutMode(null); }, [room.version]);
   async function copyInvite() {
     const link = `${location.origin}/?room=${room.code}`;
-    try { await navigator.clipboard.writeText(link); notify('邀请链接已复制，发给朋友即可加入。'); }
-    catch { notify(`复制这个链接邀请朋友：${link}`); }
+    if (await copyText(link)) notify('邀请链接已复制，发给朋友即可加入。');
+    else setInviteOpen(true);
   }
   function hint() {
     const options = legalShows(me.hand, activeCards);
@@ -90,6 +93,7 @@ export default function Game({ room, command, busy, connected, notify }) {
       </div>
       <aside className="game-sidebar"><section className="scoreboard"><div className="sidebar-title"><h2>本场记分牌</h2><span>POINTS</span></div>{[...room.players].sort((a, b) => b.score - a.score).map((p, rank) => <div className={`score-row ${p.id === room.you ? 'is-you' : ''}`} key={p.id}><span className="rank">{pad(rank + 1)}</span><div><strong>{p.name}{p.id === room.you ? '（你）' : ''}</strong><span>{!p.online ? '离线' : p.id === room.hostId ? '房主' : '玩家'} · {p.captured} 收牌 / {p.chips} 筹码</span></div><b>{p.score}</b></div>)}<p className="small-note">总分在每轮结束后结算。</p></section><section className="activity"><div className="sidebar-title"><h2>牌桌动态</h2><span>LIVE</span></div><ol>{room.logs.slice(0, 8).map((entry, i) => <li key={entry.id} className={i === 0 ? 'latest' : ''}><span>{entry.text}</span></li>)}</ol></section><div className="quick-rule"><span>✧</span><p>有时，拿走一张牌，<br/>比打出一手牌更精彩。</p></div></aside>
     </div>}
+    {inviteOpen && <InviteDialog link={`${location.origin}/?room=${room.code}`} code={room.code} onClose={() => setInviteOpen(false)}/>}
     {scoutMode && room.active && <ScoutDialog key={`${scoutMode}-${room.version}`} room={room} mode={scoutMode} command={command} busy={disabled} onClose={() => setScoutMode(null)}/>}
     {confirmReset && <Modal title="返回大厅" onClose={() => setConfirmReset(false)}><span className="eyebrow">BACK TO LOBBY</span><h2>结束本场，返回大厅？</h2><p>所有人将回到原房间大厅。本场手牌与分数会清空，可以重新开局。</p><div className="dialog-actions"><button className="button secondary" onClick={() => setConfirmReset(false)}>继续游戏</button><button className="button primary" disabled={disabled} onClick={async () => { if (await command('reset')) setConfirmReset(false); }}>结束并返回大厅</button></div></Modal>}
   </main>;
